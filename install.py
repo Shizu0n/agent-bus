@@ -161,7 +161,8 @@ def edit_json(p: Path, change, install: bool, dry: bool) -> None:
     if not dry:
         backup(p)
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(new, encoding="utf-8", newline="\n")
+        with p.open("w", encoding="utf-8", newline="\n") as f:  # write_text(newline=) needs Python 3.10
+            f.write(new)
 
 
 def run(cmd: list, dry: bool, ok_fail: bool = False) -> None:

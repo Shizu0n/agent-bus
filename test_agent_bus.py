@@ -309,7 +309,10 @@ class HookTest(unittest.TestCase):
         log.touch()
         try:
             self.run_hook("codex", {"session_id": "z", "hook_event_name": "PostToolUse"})
-            self.assertEqual(json.loads(log.read_text(encoding="utf-8"))["payload"]["session_id"], "z")
+            line = json.loads(log.read_text(encoding="utf-8"))
+            self.assertEqual(line["payload"]["session_id"], "z")
+            self.assertEqual(line["out"], "")  # unmapped session: no notice
+            self.assertLess(abs(line["t"] - time.time()), 30)
         finally:
             log.unlink()
 
@@ -379,6 +382,115 @@ class InstallTest(unittest.TestCase):
             self.assertEqual(m1[key]["agent-bus"]["args"], [install.SCRIPT])
             self.assertEqual(change(m1, False), cfg)
             self.assertEqual(change({}, False), {})
+
+
+@unittest.skipIf(os.name == "nt", "macOS/Linux install run; Windows was verified live")
+class PosixInstallRunTest(unittest.TestCase):
+    """Runs install.py for real against a fake home with stub agent CLIs, from a repo copy whose path has a
+    space, then runs each installed hook command through sh as the agents would, then uninstalls."""
+
+    def setUp(self):
+        import shutil
+        self.root = Path(tempfile.mkdtemp(prefix="agent-bus-install-"))
+        self.repo = self.root / "my repo"  # a space: hook commands must still run under sh
+        self.repo.mkdir()
+        for f in ("agent_bus.py", "install.py"):
+            shutil.copy2(HERE / f, self.repo / f)
+        self.home = self.root / "home"
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        self.calls = self.root / "calls.log"
+        for exe in ("claude", "codex", "agy"):  # stubs record their argv, one call per line
+            stub = bin_dir / exe
+            stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "{exe} $*" >> "{self.calls}"\n')
+            stub.chmod(0o755)
+        (self.home / ".cursor").mkdir(parents=True)
+        vscode = (self.home / "Library" / "Application Support" / "Code" / "User" if sys.platform == "darwin"
+                  else self.home / ".config" / "Code" / "User")
+        vscode.mkdir(parents=True)
+        self.vscode = vscode
+        claude_settings = self.home / ".claude" / "settings.json"
+        claude_settings.parent.mkdir()
+        self.other_hook = {"PostToolUse": [{"matcher": "Edit", "hooks": [{"type": "command", "command": "lint.sh"}]}]}
+        claude_settings.write_text(json.dumps({"model": "x", "hooks": self.other_hook}))
+        self.db = str(self.root / "bus.db")
+        env = {k: v for k, v in os.environ.items() if k not in ("APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME")}
+        self.env = {**env, "HOME": str(self.home), "PATH": f"{bin_dir}{os.pathsep}{env.get('PATH', '')}",
+                    "AGENT_BUS_DB": self.db}
+
+    def install(self, *args):
+        r = subprocess.run([sys.executable, str(self.repo / "install.py"), *args], env=self.env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def read(self, rel):
+        return json.loads((self.home / rel).read_text(encoding="utf-8"))
+
+    def run_shell_hook(self, command, payload):
+        r = subprocess.run(["sh", "-c", command], input=json.dumps(payload), env=self.env,
+                           capture_output=True, text=True, timeout=20)
+        self.assertEqual((r.returncode, r.stderr), (0, ""), command)
+        return r.stdout.strip()
+
+    def test_install_run_hooks_uninstall(self):
+        out = self.install("--dry-run")
+        self.assertIn("DRY RUN", out)
+        self.assertFalse((self.home / ".cursor" / "mcp.json").exists())
+        self.assertFalse(self.calls.exists())
+        out = self.install()
+        for label in ("Claude Code ==", "Antigravity ==", "Codex ==", "Cursor ==", "VS Code =="):
+            self.assertIn(label, out)
+        calls = self.calls.read_text()
+        self.assertIn(f"claude mcp add --scope user agent-bus -e AGENT_BUS_WAIT_CAP=150 -- {sys.executable}", calls)
+        self.assertIn("codex mcp add agent-bus --", calls)
+        self.assertIn("agy mcp add --env AGENT_BUS_WAIT_CAP=150 agent-bus", calls)
+        script = (self.repo / "agent_bus.py").resolve().as_posix()
+        self.assertEqual(json.loads((self.vscode / "mcp.json").read_text())["servers"]["agent-bus"]["args"], [script])
+        self.assertEqual(self.read(".cursor/mcp.json")["mcpServers"]["agent-bus"]["args"], [script])
+
+        # every installed hook command runs under sh and speaks its agent's format
+        claude = self.read(".claude/settings.json")
+        self.assertEqual(claude["model"], "x")
+        self.assertEqual(claude["hooks"]["PostToolUse"][0], self.other_hook["PostToolUse"][0])
+        commands = {
+            "claude": claude["hooks"]["PostToolUse"][1]["hooks"][0]["command"],
+            "codex": self.read(".codex/hooks.json")["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
+            "cursor": self.read(".cursor/hooks.json")["hooks"]["postToolUse"][0]["command"],
+            "antigravity": self.read(".gemini/config/hooks.json")["agent-bus"]["PreInvocation"][0]["command"],
+        }
+        os.environ["AGENT_BUS_DB"] = self.db
+        bus = ab.connect()
+        for n in ("lead", "w-claude", "w-codex", "w-cursor", "w-antigravity"):
+            ab.register(bus, n)
+        sid_field = {"claude": "session_id", "codex": "session_id", "cursor": "conversation_id",
+                     "antigravity": "conversationId"}
+        register_call = {
+            "claude": {"tool_name": "mcp__agent-bus__register", "tool_input": {"name": "w-claude"}},
+            "codex": {"tool_name": "mcp__agent_bus__register", "tool_input": {"name": "w-codex"}},
+            "cursor": {"mcp_server_name": "agent-bus", "tool_name": "register", "tool_input": {"name": "w-cursor"},
+                       "hook_event_name": "afterMCPExecution"},
+            "antigravity": {"toolCall": {"args": {"ServerName": "agent-bus", "ToolName": "register",
+                                                  "Arguments": {"name": "w-antigravity"}}}},
+        }
+        for agent, cmd in commands.items():
+            sid = {sid_field[agent]: f"s-{agent}"}
+            mapping = cmd.replace(" PreInvocation", " PostToolUse") if agent == "antigravity" else cmd
+            self.run_shell_hook(mapping, {**sid, **register_call[agent]})
+            ab.send(bus, "lead", f"w-{agent}", "hello")
+            out = self.run_shell_hook(cmd, {**sid, "tool_name": "Bash", "hook_event_name": "postToolUse"
+                                            if agent == "cursor" else "PostToolUse"})
+            self.assertIn(f"TEAM BUS: 1 new message(s) for w-{agent} from lead", out, agent)
+            json.loads(out)
+        bus.close()
+
+        self.install("--uninstall")
+        self.assertEqual(self.read(".claude/settings.json"), {"model": "x", "hooks": self.other_hook})
+        for rel in (".codex/hooks.json", ".cursor/hooks.json", ".cursor/mcp.json", ".gemini/config/hooks.json"):
+            self.assertEqual(self.read(rel), {}, rel)
+        self.assertIn("claude mcp remove --scope user agent-bus", self.calls.read_text())
+        self.assertIn("agy mcp remove agent-bus", self.calls.read_text())
+        self.assertTrue(list((self.home / ".claude").glob("settings.json.bak-agent-bus-*")))
 
 
 if __name__ == "__main__":

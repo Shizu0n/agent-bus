@@ -370,11 +370,15 @@ def hook(agent: str, event: str = "") -> int:
     try:
         payload = json.loads(sys.stdin.buffer.read().decode("utf-8-sig") or "{}")  # Cursor sends a BOM
         payload = payload if isinstance(payload, dict) else {}
+        started = time.time()
+        out = hook_output(agent, payload, event)
         log = db_path().parent / "hook-payloads.jsonl"
         if log.exists():  # opt-in: create this file to record raw payloads when adding an agent; delete it after
+            # t (when the agent started the hook) and out (what it answered) give a timeline of notices,
+            # e.g. to see which events an agent fires during a shell command and when a notice went out
             with log.open("a", encoding="utf-8") as f:
-                f.write(json.dumps({"agent": agent, "event": event, "payload": payload}, ensure_ascii=False) + "\n")
-        out = hook_output(agent, payload, event)
+                f.write(json.dumps({"t": round(started, 3), "agent": agent, "event": event, "payload": payload,
+                                    "out": out}, ensure_ascii=False) + "\n")
     except Exception as e:  # a hook must never break the agent's turn
         print(f"agent-bus hook: {type(e).__name__}: {e}", file=sys.stderr)
         out = "" if HOOK_AGENTS[agent]["out"] == "claude" else "{}"

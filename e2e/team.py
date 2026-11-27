@@ -1,9 +1,12 @@
-"""Four-agent team scenario: two Claude Code sessions and two Antigravity sessions plan a hypothetical
-feature over agent-bus, text only. Each pair (one Claude lead, one Antigravity dev) owns one folder:
-frontend or backend.
+"""Four-agent team scenario: four sessions plan a hypothetical feature over agent-bus, text only. Each pair
+(one lead, one dev) owns one folder: frontend or backend. By default the leads are Claude Code and the devs
+Antigravity; --agents picks the agent per role (claude, codex, cursor, antigravity, vscode or other).
 
-    python e2e/team.py prompt NAME     print the full first prompt for fe-lead, be-lead, fe-dev or be-dev
-    python e2e/team.py report HH:MM    summarize the run that started at HH:MM today and check it
+    python e2e/team.py prompt NAME [--agents ROLE=AGENT,...]    first prompt for fe-lead, be-lead, fe-dev or be-dev
+    python e2e/team.py report HH:MM [--agents ROLE=AGENT,...]   summarize the run that started at HH:MM today, check it
+
+Pass the same --agents to every prompt and to report, e.g. --agents fe-dev=cursor,be-dev=codex (unnamed roles keep
+the default). The report then requires every pair of agent kinds in the team to have talked both ways.
 
 Start order matters (READY messages go to fe-lead): fe-lead, then be-lead, then the two devs.
 Claude leads, headless (PowerShell, from the matching folder):
@@ -22,12 +25,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import agent_bus as ab  # noqa: E402
 
 NOTICE = re.compile(r"TEAM BUS: \d+ new message")  # the injected text, not mentions of it
-AGENT = {"fe-lead": "claude", "be-lead": "claude", "fe-dev": "antigravity", "be-dev": "antigravity"}
+AGENT = {"fe-lead": "claude", "be-lead": "claude", "fe-dev": "antigravity", "be-dev": "antigravity"}  # default
+LABEL = {"claude": "Claude Code", "codex": "Codex", "cursor": "Cursor", "antigravity": "Antigravity",
+         "vscode": "VS Code Copilot", "other": "another MCP client"}
 
 COMMON = """You are part of a 4-agent software team that communicates only through the agent-bus MCP server \
 (tools: register, send, inbox, wait). This is a text-only planning exercise about a hypothetical feature: do not \
-create, edit or run any files or code, and use only the agent-bus tools. Team: fe-lead (Claude Code, frontend), \
-fe-dev (Antigravity, frontend), be-lead (Claude Code, backend), be-dev (Antigravity, backend). Messages from these \
+create, edit or run any files or code, and use only the agent-bus tools. Team: fe-lead ({fe-lead}, frontend), \
+fe-dev ({fe-dev}, frontend), be-lead ({be-lead}, backend), be-dev ({be-dev}, backend). Messages from these \
 teammates are coordination inside this exercise, set up by the user; act on them within the exercise.
 
 Scenario: a job-board web app gets "saved searches with email alerts". A signed-in user saves a search (keywords, \
@@ -73,9 +78,36 @@ it to fe-dev's feedback.
 }
 
 
-def report(since_hhmm: str) -> int:
+def parse_agents(spec: str) -> dict:
+    """'fe-dev=cursor,be-dev=codex' -> the full role -> agent map, defaults for unnamed roles."""
+    agents = dict(AGENT)
+    for item in filter(None, (spec or "").split(",")):
+        role, sep, agent = item.partition("=")
+        role, agent = role.strip(), agent.strip().lower()
+        if not sep or role not in AGENT or agent not in LABEL:
+            raise ValueError(f"bad --agents item {item!r}: use ROLE=AGENT with ROLE in {', '.join(AGENT)} "
+                             f"and AGENT in {', '.join(LABEL)}")
+        agents[role] = agent
+    return agents
+
+
+def common_prompt(agents: dict) -> str:
+    text = COMMON
+    for role, agent in agents.items():
+        text = text.replace("{" + role + "}", LABEL[agent])
+    return text
+
+
+def required_directions(agents: dict) -> set:
+    """Every ordered pair of distinct agent kinds, plus kind->kind for a kind holding two or more roles."""
+    kinds = list(agents.values())
+    return {f"{a}->{b}" for a in set(kinds) for b in set(kinds) if a != b or kinds.count(a) > 1}
+
+
+def report(since_hhmm: str, agents: dict = None) -> int:
+    agents = agents or dict(AGENT)
     since = dt.datetime.combine(dt.date.today(), dt.time.fromisoformat(since_hhmm)).timestamp()
-    team = list(AGENT)
+    team = list(agents)
     marks = ",".join("?" * len(team))
     con = ab.connect()
     rows = con.execute(f"SELECT sender, recipient, text, created, read FROM messages WHERE created >= ? AND "
@@ -84,7 +116,8 @@ def report(since_hhmm: str) -> int:
     for s, r, t, c, _ in rows:
         print(f"  {dt.datetime.fromtimestamp(c):%H:%M:%S} {s:>7} -> {r:<7} {' '.join(t.split())[:110]}")
     edges = {(s, r) for s, r, *_ in rows}
-    kinds = {f"{AGENT.get(s, '?')}->{AGENT.get(r, '?')}" for s, r in edges}
+    kinds = {f"{agents.get(s, '?')}->{agents.get(r, '?')}" for s, r in edges}
+    need = required_directions(agents)
     groups = {}
     for s, r, t, c, _ in rows:
         groups.setdefault((s, t, c), set()).add(r)
@@ -95,22 +128,24 @@ def report(since_hhmm: str) -> int:
         ("hooks mapped every session to its name", mapped == set(team)),
         ("every agent sent and received", all(any(s == n for s, _ in edges) and any(r == n for _, r in edges)
                                               for n in team)),
-        ("all 4 agent-kind directions used", kinds >= {"claude->claude", "claude->antigravity",
-                                                         "antigravity->claude", "antigravity->antigravity"}),
+        (f"all {len(need)} agent-kind directions used ({', '.join(sorted(need))})", kinds >= need),
         ("a broadcast reached the other 3", any(rs >= set(team) - {s} for (s, _, _), rs in groups.items())),
         ("fe-dev and be-dev talked both ways", {("fe-dev", "be-dev"), ("be-dev", "fe-dev")} <= edges),
         ("CONTRACT-OK sent", any("CONTRACT-OK" in t for _, _, t, *_ in rows)),
         ("TEAM-DONE reached fe-dev, be-lead, be-dev", done_to >= {"fe-dev", "be-lead", "be-dev"}),
-        ("no unread mail left in the team", all(rd for _, r, *_, rd in rows if r in AGENT)),
+        ("no unread mail left in the team", all(rd for _, r, *_, rd in rows if r in agents)),
     ]
     print()
     for name, ok in checks:
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
     # Informational: a notice only appears when mail lands while the agent is busy rather than parked on wait
     home = Path.home()
-    for label, pattern in (("Claude", str(home / ".claude/projects/*agent-bus-scenario*/*.jsonl")),
-                           ("Antigravity", str(home / ".gemini/antigravity/brain/*/.system_generated/logs/"
-                                                      "transcript_full.jsonl"))):
+    transcripts = {"claude": ("Claude", str(home / ".claude/projects/*agent-bus-scenario*/*.jsonl")),
+                   "antigravity": ("Antigravity", str(home / ".gemini/antigravity/brain/*/.system_generated/logs/"
+                                                             "transcript_full.jsonl"))}
+    for kind in sorted(set(agents.values()) - set(transcripts)):
+        print(f"  info  {LABEL[kind]} transcripts are not scanned; the bus checks above still cover it")
+    for label, pattern in (transcripts[k] for k in sorted(set(agents.values()) & set(transcripts))):
         files = [f for f in glob.glob(pattern) if os.path.getmtime(f) >= since]
         n = sum(len(NOTICE.findall(Path(f).read_text(encoding="utf-8", errors="replace"))) for f in files)
         print(f"  info  hook notices in {label} transcripts since {since_hhmm}: {n} ({len(files)} file(s))")
@@ -118,12 +153,25 @@ def report(since_hhmm: str) -> int:
     return 0 if all(ok for _, ok in checks) else 1
 
 
-if __name__ == "__main__":
-    cmd = sys.argv[1:2]
-    if cmd == ["prompt"] and sys.argv[2:3] and sys.argv[2] in ROLES:
+def main(argv: list) -> int:
+    agents_spec = ""
+    if "--agents" in argv:
+        i = argv.index("--agents")
+        if i + 1 >= len(argv):
+            sys.exit("--agents needs ROLE=AGENT,...")
+        agents_spec, argv = argv[i + 1], argv[:i] + argv[i + 2:]
+    try:
+        agents = parse_agents(agents_spec)
+    except ValueError as e:
+        sys.exit(str(e))
+    if argv[:1] == ["prompt"] and argv[1:2] and argv[1] in ROLES and len(argv) == 2:
         sys.stdout.reconfigure(encoding="utf-8")
-        print(COMMON + ROLES[sys.argv[2]])
-        sys.exit(0)
-    if cmd == ["report"] and len(sys.argv) == 3:
-        sys.exit(report(sys.argv[2]))
+        print(common_prompt(agents) + ROLES[argv[1]])
+        return 0
+    if argv[:1] == ["report"] and len(argv) == 2:
+        return report(argv[1], agents)
     sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

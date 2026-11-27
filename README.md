@@ -1,5 +1,7 @@
 # agent-bus
 
+[![tests](https://github.com/Shizu0n/agent-bus/actions/workflows/test.yml/badge.svg)](https://github.com/Shizu0n/agent-bus/actions/workflows/test.yml)
+
 A team message bus for coding agents from different vendors, each staying in its own app: Claude Code,
 Codex, Cursor, Antigravity, VS Code or any other MCP client send each other messages through one shared
 SQLite file. Python 3.9+, standard library only.
@@ -71,6 +73,12 @@ shows every command and JSON diff without changing anything. Then:
 ```powershell
 python install.py
 ```
+
+On macOS and Linux use `python3` (same flags). There the agent CLIs (`claude`, `codex`, `agy`) must be on
+`PATH`, and VS Code's config is `~/Library/Application Support/Code/User` (macOS) or `~/.config/Code/User`
+(Linux). If the repo or Python path has a space, hook commands are shell-quoted; Codex's hook runner rejected
+quoted paths on Windows, so prefer a path without spaces. CI runs the installer end to end on macOS and Linux
+against stub CLIs (`PosixInstallRunTest`); a live install on a Mac or Linux machine is not verified yet.
 
 It sets up every agent it finds (`--only claude,codex,...` to pick):
 
@@ -157,7 +165,9 @@ python -m unittest -v
 
 Covers the MCP handshake, two server processes exchanging messages, `wait` returning on arrival and on
 timeout, a cancelled `wait`, the unread notice on `send`, four processes writing to one DB at once, the
-four hook formats and the installer's merge and uninstall for every agent.
+four hook formats, the installer's merge and uninstall for every agent, a full install, hook run and
+uninstall on macOS/Linux against stub CLIs, and the e2e helpers below. GitHub Actions runs them on Ubuntu,
+Windows and macOS with Python 3.9 and 3.13.
 
 `e2e/notice.py` checks any agent live: it plays the lead, keeps each member busy with shell commands and
 sends a codeword meanwhile. PASS needs bus evidence that a hook announced it before the member read it
@@ -168,8 +178,16 @@ sends a codeword meanwhile. PASS needs bus evidence that a hook announced it bef
 python e2e/notice.py run cx cur      # then paste `python e2e/notice.py prompt cx` (and cur) into each agent
 ```
 
-`e2e/team.py` is a live four-agent scenario (two Claude Code leads, two Antigravity devs, one frontend and
-one backend pair, text only) with the first prompts and a checked report; see its docstring.
+`run` prints how many seconds after the codeword each hook announced it. With the opt-in hook log present
+(`~/.agent-bus/hook-payloads.jsonl`), `python e2e/notice.py timeline cur` then lists every hook event that
+member's agent fired around the codeword, its tool, whether it carried a session id, and when the notice
+went out: the way to see why one agent announces later than another.
+
+`e2e/team.py` is a live four-agent scenario (one frontend and one backend pair, each a lead and a dev, text
+only) with the first prompts and a checked report. By default the leads are Claude Code and the devs
+Antigravity; `--agents fe-dev=cursor,be-dev=codex` (same value for every `prompt` and for `report`) picks
+the agent per role, and the report then requires every pair of agent kinds to have talked both ways. See
+its docstring.
 
 ## License
 

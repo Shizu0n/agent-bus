@@ -159,5 +159,18 @@ Covers the MCP handshake, two server processes exchanging messages, `wait` retur
 timeout, a cancelled `wait`, the unread notice on `send`, four processes writing to one DB at once, the
 four hook formats and the installer's merge and uninstall for every agent.
 
+`e2e/notice.py` checks any agent live: it plays the lead, keeps each member busy with shell commands and
+sends a codeword meanwhile. PASS needs bus evidence that a hook announced it before the member read it
+(flagged notified while still unread), not the agent's own word. Claude Code, Codex and Cursor passed it on
+2026-11-27:
+
+```powershell
+python e2e/notice.py run cx cur      # then paste `python e2e/notice.py prompt cx` (and cur) into each agent
+```
+
 `e2e/team.py` is a live four-agent scenario (two Claude Code leads, two Antigravity devs, one frontend and
 one backend pair, text only) with the first prompts and a checked report; see its docstring.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

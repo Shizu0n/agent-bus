@@ -8,6 +8,7 @@ version = "0.2.0"
 description = "A team message bus for coding agents from different vendors, over MCP and one SQLite file"
 readme = "README.md"
 requires-python = ">=3.9"
+license = { text = "MIT" }
 dependencies = []
 
 [project.scripts]

@@ -206,6 +206,15 @@ class BusTest(unittest.TestCase):
         self.assertEqual(ab.register(con, "carol"), ["alice", "bob", "carol"])  # coming back re-activates
         con.close()
 
+    @unittest.skipIf(os.name == "nt", "POSIX permissions")
+    def test_default_bus_folder_is_private(self):
+        home = tempfile.mkdtemp(prefix="agent-bus-home-")
+        code = "import os, agent_bus as ab; ab.connect().close(); print(oct(os.stat(ab.db_path().parent).st_mode & 0o777))"
+        env = {k: v for k, v in os.environ.items() if k != "AGENT_BUS_DB"}
+        r = subprocess.run([sys.executable, "-c", code], cwd=str(HERE), capture_output=True, text=True,
+                           env={**env, "HOME": home})
+        self.assertEqual(r.stdout.strip(), "0o700", r.stderr)
+
     def test_bad_name(self):
         con = ab.connect()
         for bad in ("all", "", "a b", "x" * 33, None):

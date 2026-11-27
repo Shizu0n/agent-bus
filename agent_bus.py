@@ -44,6 +44,8 @@ def db_path() -> Path:
 def connect() -> sqlite3.Connection:
     p = db_path()
     p.parent.mkdir(parents=True, exist_ok=True)
+    if not os.environ.get("AGENT_BUS_DB"):  # never chmod a folder the user chose (it may be shared, like /tmp)
+        os.chmod(p.parent, 0o700)  # messages and hook payloads stay private to this user (no-op on Windows ACLs)
     con = sqlite3.connect(str(p), timeout=10, isolation_level=None)  # autocommit; explicit BEGIN where needed
     con.execute("PRAGMA journal_mode=WAL")  # several server and hook processes share the file
     con.execute("PRAGMA busy_timeout=10000")

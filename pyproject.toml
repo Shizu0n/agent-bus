@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-bus"
+version = "0.2.0"
+description = "A team message bus for coding agents from different vendors, over MCP and one SQLite file"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+agent-bus = "agent_bus:main"
+
+[tool.setuptools]
+py-modules = ["agent_bus"]

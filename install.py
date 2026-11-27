@@ -11,6 +11,7 @@ rewritten. The bus database (~/.agent-bus/bus.db) is never deleted.
 import difflib
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -35,13 +36,17 @@ LONG_WAIT = "AGENT_BUS_WAIT_CAP=150"
 
 def bare_path(p: str) -> str:
     """A path usable unquoted (Antigravity runs hooks via cmd /c, which rejects its escaped quotes):
-    as is without spaces, else its 8.3 short form."""
-    if " " in p and os.name == "nt":
+    as is without spaces; else on Windows its 8.3 short form, and on macOS/Linux a shell-quoted path
+    (hook runners there start a shell; a path with spaces cannot be left bare)."""
+    if " " not in p:
+        return p
+    if os.name == "nt":
         import ctypes
         buf = ctypes.create_unicode_buffer(1024)
         if ctypes.windll.kernel32.GetShortPathNameW(p, buf, 1024):
             return buf.value.replace("\\", "/")
-    return p
+        return p
+    return shlex.quote(p)
 
 
 QUOTED = f'"{PY}" "{SCRIPT}" hook'  # Claude Code runs hooks in bash: quotes are fine
@@ -171,8 +176,8 @@ def run(cmd: list, dry: bool, ok_fail: bool = False) -> None:
         sys.exit(f"command failed ({r.returncode}); steps before it already ran (see above), later ones did not. Fix and re-run.")
 
 
-def find(exe: str, fallback: Path):
-    return shutil.which(exe) or (str(fallback) if fallback.exists() else None)
+def find(exe: str, fallback):
+    return shutil.which(exe) or (str(fallback) if fallback and fallback.exists() else None)
 
 
 def setup_claude(exe, install, dry):
@@ -208,11 +213,14 @@ def setup_vscode(_, install, dry):  # MCP only: no hook can add context here, so
     edit_json(VSCODE_DIR / "mcp.json", mcp_json("servers", {"type": "stdio"}), install, dry)
 
 
+EXE = ".exe" if os.name == "nt" else ""
+# Fallbacks for CLIs installed outside PATH. Antigravity's per-user folder exists only on Windows
+# (LOCALAPPDATA); elsewhere it must be on PATH (an empty LOCALAPPDATA would resolve against the cwd).
+AGY_FALLBACK = Path(os.environ["LOCALAPPDATA"]) / "agy" / "bin" / "agy.exe" if os.environ.get("LOCALAPPDATA") else None
+
 AGENTS = {  # name: (label, how to detect it, setup)
-    "claude": ("Claude Code", lambda: find("claude", HOME / ".local" / "bin" / "claude.exe"), setup_claude),
-    "antigravity": ("Antigravity",
-                    lambda: find("agy", Path(os.environ.get("LOCALAPPDATA", "")) / "agy" / "bin" / "agy.exe"),
-                    setup_antigravity),
+    "claude": ("Claude Code", lambda: find("claude", HOME / ".local" / "bin" / f"claude{EXE}"), setup_claude),
+    "antigravity": ("Antigravity", lambda: find("agy", AGY_FALLBACK), setup_antigravity),
     "codex": ("Codex", lambda: shutil.which("codex"), setup_codex),
     "cursor": ("Cursor", lambda: CURSOR_DIR.is_dir() or None, setup_cursor),
     "vscode": ("VS Code", lambda: VSCODE_DIR.is_dir() or None, setup_vscode),
@@ -226,6 +234,10 @@ def main(args: list) -> int:
         sys.exit(f"unknown agent(s): {', '.join(sorted(set(only) - set(AGENTS)))}; known: {', '.join(AGENTS)}")
     if dry:
         print("DRY RUN: nothing is changed.\n")
+    if os.name != "nt" and (" " in PY or " " in SCRIPT):
+        print("Note: the Python or agent-bus path has a space, so hook commands quote it. Codex's hook runner\n"
+              "rejected quoted paths on Windows; if Codex reports its hook as Failed, move the repo (or Python)\n"
+              "to a path without spaces and re-run.\n")
     for key, (label, detect, setup) in AGENTS.items():
         if only and key not in only:
             continue
